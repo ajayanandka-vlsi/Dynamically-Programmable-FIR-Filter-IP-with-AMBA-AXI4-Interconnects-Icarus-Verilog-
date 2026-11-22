@@ -45,7 +45,7 @@ Simulated with Icarus Verilog on EDA Playground.
 
 ### Simulation result
 
-![Console output](console_pass_1.png)
+![Console output](console_pass_.png)
 
 ### Coefficient commit
 
