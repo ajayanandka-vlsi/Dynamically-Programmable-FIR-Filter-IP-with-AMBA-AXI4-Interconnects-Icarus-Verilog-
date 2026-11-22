@@ -1,29 +1,4 @@
 `timescale 1ns / 1ps
-// =============================================================================
-// Dynamically programmable 4-tap FIR filter IP
-//   * AXI4-Lite slave  : coefficient registers (double-buffered) + commit
-//   * AXI4-Stream      : 16-bit signed samples in, 34-bit signed results out
-//
-// Register map (byte addresses, 32-bit registers)
-//   0x00  C0  [15:0] R/W  shadow coefficient 0 (reads return the shadow value)
-//   0x04  C1  [15:0] R/W  shadow coefficient 1
-//   0x08  C2  [15:0] R/W  shadow coefficient 2
-//   0x0C  C3  [15:0] R/W  shadow coefficient 3
-//   0x10  CTRL  [0]   W   write 1 -> copy all four shadows into the active
-//                         coefficients in ONE clock edge (reads return 0)
-//   any other address  -> SLVERR (2'b10), no register changes
-//
-// Changes compared with v1
-//   1. WSTRB honoured per byte (v1 checked only wstrb[0] but wrote 2 bytes)
-//   2. Unmapped addresses answer SLVERR instead of a silent OKAY
-//   3. Coefficient reads return the shadow (what the CPU last wrote)
-//   4. A new read address is accepted only when the previous read data has
-//      been taken (v1 could accept a 2nd read while RVALID was still high)
-//   5. FIR stalls only when its OUTPUT holds valid data the sink is not taking
-//      (v1 froze the whole pipeline whenever m_axis_tready was low, even if
-//      the pipeline was empty)
-//   6. One reset style everywhere: synchronous, active-low (AXI convention)
-// =============================================================================
 
 module axi4_lite_slave #(
     parameter ADDR_WIDTH = 5,
@@ -60,19 +35,14 @@ module axi4_lite_slave #(
     reg        aw_en;
     reg [15:0] shadow_c0, shadow_c1, shadow_c2, shadow_c3;
 
-    // A write happens on the edge where both the AW and W handshakes complete
     wire wr_fire = awready && awvalid && wready && wvalid;
-    // A read address is accepted on the edge where AR handshakes
     wire rd_fire = arready && arvalid;
 
-    // Address decode: only 0x00, 0x04, 0x08, 0x0C, 0x10 exist
     wire wr_addr_ok = (awaddr == 5'h00) || (awaddr == 5'h04) || (awaddr == 5'h08) ||
                       (awaddr == 5'h0C) || (awaddr == 5'h10);
     wire rd_addr_ok = (araddr == 5'h00) || (araddr == 5'h04) || (araddr == 5'h08) ||
                       (araddr == 5'h0C) || (araddr == 5'h10);
 
-    // ---------------- write address ready ----------------
-    // aw_en blocks a new write until the previous write response is accepted
     always @(posedge aclk) begin
         if (!aresetn) begin
             awready <= 1'b0;
@@ -90,7 +60,6 @@ module axi4_lite_slave #(
         end
     end
 
-    // ---------------- write data ready ----------------
     always @(posedge aclk) begin
         if (!aresetn) begin
             wready <= 1'b0;
@@ -102,7 +71,6 @@ module axi4_lite_slave #(
         end
     end
 
-    // ---------------- register writes (byte strobes honoured) ----------------
     always @(posedge aclk) begin
         if (!aresetn) begin
             c0 <= 16'h0000; c1 <= 16'h0000; c2 <= 16'h0000; c3 <= 16'h0000;
@@ -127,7 +95,6 @@ module axi4_lite_slave #(
                     if (wstrb[1]) shadow_c3[15:8] <= wdata[15:8];
                 end
                 5'h10: begin
-                    // commit: all four active coefficients change on the same edge
                     if (wstrb[0] && wdata[0]) begin
                         c0 <= shadow_c0;
                         c1 <= shadow_c1;
@@ -135,12 +102,11 @@ module axi4_lite_slave #(
                         c3 <= shadow_c3;
                     end
                 end
-                default: ; // unmapped: no change (answered with SLVERR below)
+                default: ;
             endcase
         end
     end
 
-    // ---------------- write response ----------------
     always @(posedge aclk) begin
         if (!aresetn) begin
             bvalid <= 1'b0;
@@ -155,8 +121,6 @@ module axi4_lite_slave #(
         end
     end
 
-    // ---------------- read address ready ----------------
-    // Accept a new read only when no read data is waiting to be taken
     always @(posedge aclk) begin
         if (!aresetn) begin
             arready <= 1'b0;
@@ -168,7 +132,6 @@ module axi4_lite_slave #(
         end
     end
 
-    // ---------------- read data / response ----------------
     always @(posedge aclk) begin
         if (!aresetn) begin
             rvalid <= 1'b0;
@@ -183,7 +146,7 @@ module axi4_lite_slave #(
                     5'h04:   rdata <= {16'd0, shadow_c1};
                     5'h08:   rdata <= {16'd0, shadow_c2};
                     5'h0C:   rdata <= {16'd0, shadow_c3};
-                    default: rdata <= {DATA_WIDTH{1'b0}};   // 0x10 and unmapped read 0
+                    default: rdata <= {DATA_WIDTH{1'b0}};
                 endcase
             end else if (rvalid && rready) begin
                 rvalid <= 1'b0;
@@ -191,7 +154,6 @@ module axi4_lite_slave #(
         end
     end
 endmodule
-
 
 module axi_stream_fir #(
     parameter D_WIDTH = 16,
@@ -217,18 +179,16 @@ module axi_stream_fir #(
     assign coeff[2] = c2;
     assign coeff[3] = c3;
 
-    reg signed [D_WIDTH-1:0]         shift_reg [0:3];   // x[n], x[n-1], x[n-2], x[n-3]
-    reg signed [D_WIDTH+C_WIDTH-1:0] mult_reg  [0:3];   // 16x16 -> 32 bits
-    reg signed [D_WIDTH+C_WIDTH:0]   add_stg1_0;        // 33 bits
+    reg signed [D_WIDTH-1:0]         shift_reg [0:3];
+    reg signed [D_WIDTH+C_WIDTH-1:0] mult_reg  [0:3];
+    reg signed [D_WIDTH+C_WIDTH:0]   add_stg1_0;
     reg signed [D_WIDTH+C_WIDTH:0]   add_stg1_1;
-    reg signed [D_WIDTH+C_WIDTH+1:0] add_stg2;          // 34 bits: no overflow possible
+    reg signed [D_WIDTH+C_WIDTH+1:0] add_stg2;
 
-    reg [3:0] valid_pipe;   // valid bit travelling with each pipeline stage
+    reg [3:0] valid_pipe;
 
-    // Freeze the pipeline only when the output holds a VALID result that the
-    // sink is not accepting. Empty stages (bubbles) keep moving.
     wire stall    = m_axis_tvalid && !m_axis_tready;
-    wire in_fire  = s_axis_tvalid && !stall;       // input handshake
+    wire in_fire  = s_axis_tvalid && !stall;
 
     assign s_axis_tready = !stall;
 
@@ -245,16 +205,13 @@ module axi_stream_fir #(
             add_stg2   <= 0;
             valid_pipe <= 4'b0000;
         end else if (!stall) begin
-            // Stage 1: shift in a new sample only when one is transferred
             if (in_fire) begin
                 shift_reg[0] <= $signed(s_axis_tdata);
                 for (i = 1; i < 4; i = i + 1)
                     shift_reg[i] <= shift_reg[i-1];
             end
-            // Stage 2: four multiplies in parallel
             for (i = 0; i < 4; i = i + 1)
                 mult_reg[i] <= shift_reg[i] * coeff[i];
-            // Stages 3 and 4: adder tree
             add_stg1_0 <= mult_reg[0] + mult_reg[1];
             add_stg1_1 <= mult_reg[2] + mult_reg[3];
             add_stg2   <= add_stg1_0 + add_stg1_1;
@@ -266,7 +223,6 @@ module axi_stream_fir #(
     assign m_axis_tdata  = add_stg2;
     assign m_axis_tvalid = valid_pipe[3];
 endmodule
-
 
 module top_axi_fir_ip (
     input  wire        aclk,
