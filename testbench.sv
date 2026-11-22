@@ -1,18 +1,6 @@
 `timescale 1ns / 1ps
-// =============================================================================
-// Self-checking testbench for top_axi_fir_ip
-//   1. Register tests : write/read-back, byte strobes, SLVERR on bad addresses
-//   2. Stream test A  : 300 samples, random gaps on the input, random
-//                       back-pressure on the output, CPU writing NEW shadow
-//                       coefficients at the same time (must NOT affect output)
-//   3. Commit         : once the pipeline is drained, commit coefficient set B
-//   4. Stream test B  : 300 more samples with set B (incl. negative coeffs)
-//   A reference model computes every expected output; a checker also verifies
-//   that m_axis_tdata/tvalid stay stable while the sink holds tready low.
-// =============================================================================
 module tb_top;
 
-    // ------------------------------------------------------------ DUT signals
     reg         aclk;
     reg         aresetn;
 
@@ -52,23 +40,20 @@ module tb_top;
         .m_axis_tdata(m_axis_tdata),   .m_axis_tvalid(m_axis_tvalid), .m_axis_tready(m_axis_tready)
     );
 
-    always #5 aclk = ~aclk;   // 100 MHz
+    always #5 aclk = ~aclk;
 
-    // ------------------------------------------------------------ bookkeeping
     integer errors;
-    integer to_send;      // samples the stream driver may present (set by the main sequence)
-    integer sent;         // samples presented so far
-    integer tx_count;     // samples accepted by the DUT
-    integer rx_count;     // results accepted from the DUT
-    reg     bp_on;        // random back-pressure on m_axis_tready
+    integer to_send;
+    integer sent;
+    integer tx_count;
+    integer rx_count;
+    reg     bp_on;
     integer seed;
 
-    // reference model state
-    reg signed [15:0] mc0, mc1, mc2, mc3;     // ACTIVE coefficients as the DUT should use them
-    reg signed [15:0] x0, x1, x2, x3;         // sample history (newest first)
-    reg signed [63:0] exp_mem [0:4095];       // expected results, in order
+    reg signed [15:0] mc0, mc1, mc2, mc3;
+    reg signed [15:0] x0, x1, x2, x3;
+    reg signed [63:0] exp_mem [0:4095];
 
-    // ------------------------------------------------------------ AXI-Lite tasks
     reg [1:0]  t_resp;
     reg [31:0] t_data;
     reg        aw_done, w_done, b_done, ar_done, r_done;
@@ -112,7 +97,7 @@ module tb_top;
         end
     endtask
 
-    task check_read;      // read addr and compare data + response
+    task check_read;
         input [4:0]  addr;
         input [31:0] exp_data;
         input [1:0]  exp_resp;
@@ -126,7 +111,7 @@ module tb_top;
         end
     endtask
 
-    task check_write;     // write and compare the response
+    task check_write;
         input [4:0]  addr;
         input [31:0] data;
         input [3:0]  strb;
@@ -140,7 +125,7 @@ module tb_top;
         end
     endtask
 
-    task write_shadows;   // write 4 coefficients (full strobes), no commit
+    task write_shadows;
         input [15:0] a0, a1, a2, a3;
         begin
             check_write(5'h00, {16'd0, a0}, 4'hF, 2'b00);
@@ -150,7 +135,7 @@ module tb_top;
         end
     endtask
 
-    task wait_drained;    // all requested samples sent, accepted and their results received
+    task wait_drained;
         begin
             while (!(sent == to_send && !s_axis_tvalid && rx_count == tx_count))
                 @(posedge aclk);
@@ -158,19 +143,16 @@ module tb_top;
         end
     endtask
 
-    // ------------------------------------------------------------ stream driver + reference model
     always @(posedge aclk) begin
         if (!aresetn) begin
             s_axis_tvalid <= 1'b0;
             s_axis_tdata  <= 16'd0;
         end else begin
-            // 1) a sample is transferred on this edge -> update the model
             if (s_axis_tvalid && s_axis_tready) begin
                 x3 = x2; x2 = x1; x1 = x0; x0 = s_axis_tdata;
                 exp_mem[tx_count] = mc0 * x0 + mc1 * x1 + mc2 * x2 + mc3 * x3;
                 tx_count = tx_count + 1;
             end
-            // 2) choose what to present next (only if the current beat is finished)
             if (!s_axis_tvalid || s_axis_tready) begin
                 if (sent < to_send && ($random(seed) % 4 != 0)) begin
                     s_axis_tvalid <= 1'b1;
@@ -183,20 +165,17 @@ module tb_top;
         end
     end
 
-    // ------------------------------------------------------------ sink: random back-pressure
     always @(posedge aclk) begin
         if (!aresetn) m_axis_tready <= 1'b1;
         else          m_axis_tready <= bp_on ? ($random(seed) % 3 != 0) : 1'b1;
     end
 
-    // ------------------------------------------------------------ output checker
     reg        prev_stall;
     reg [33:0] prev_data;
     always @(posedge aclk) begin
         if (!aresetn) begin
             prev_stall <= 1'b0;
         end else begin
-            // AXI-Stream rule: once TVALID is high it must stay high with stable data until TREADY
             if (prev_stall && (!m_axis_tvalid || m_axis_tdata !== prev_data)) begin
                 errors = errors + 1;
                 $display("ERROR @%0t output changed while stalled", $time);
@@ -218,7 +197,6 @@ module tb_top;
         end
     end
 
-    // ------------------------------------------------------------ watchdog
     initial begin
         #2_000_000;
         $display("ERROR: timeout");
@@ -226,7 +204,6 @@ module tb_top;
         $finish;
     end
 
-    // ------------------------------------------------------------ main sequence
     initial begin
         $dumpfile("top_axi_fir.vcd");
         $dumpvars(0, tb_top);
@@ -245,50 +222,41 @@ module tb_top;
         aresetn <= 1'b1;
         repeat (2) @(posedge aclk);
 
-        // ---------- 1. register tests ----------
         $display("[%0t] register tests", $time);
         write_shadows(16'h1000, 16'h2000, 16'h2000, 16'h1000);
         check_read(5'h00, 32'h0000_1000, 2'b00);
         check_read(5'h04, 32'h0000_2000, 2'b00);
         check_read(5'h08, 32'h0000_2000, 2'b00);
         check_read(5'h0C, 32'h0000_1000, 2'b00);
-        check_read(5'h10, 32'h0000_0000, 2'b00);       // CTRL reads 0
-        // byte strobes: change only byte 0, then only byte 1 of C0
+        check_read(5'h10, 32'h0000_0000, 2'b00);
         check_write(5'h00, 32'h0000_00AB, 4'b0001, 2'b00);
         check_read (5'h00, 32'h0000_10AB, 2'b00);
         check_write(5'h00, 32'h0000_CD00, 4'b0010, 2'b00);
         check_read (5'h00, 32'h0000_CDAB, 2'b00);
-        // unmapped addresses -> SLVERR, and nothing changes
         check_write(5'h14, 32'hDEAD_BEEF, 4'hF, 2'b10);
         check_read (5'h14, 32'h0000_0000, 2'b10);
-        check_write(5'h02, 32'h0000_FFFF, 4'hF, 2'b10);   // misaligned
+        check_write(5'h02, 32'h0000_FFFF, 4'hF, 2'b10);
         check_read (5'h00, 32'h0000_CDAB, 2'b00);
 
-        // ---------- commit coefficient set A ----------
         write_shadows(16'h1000, 16'h2000, 16'h2000, 16'h1000);
         check_write(5'h10, 32'h1, 4'hF, 2'b00);
         mc0 = 16'h1000; mc1 = 16'h2000; mc2 = 16'h2000; mc3 = 16'h1000;
 
-        // ---------- 2. stream A with back-pressure + concurrent CPU writes ----------
         $display("[%0t] stream A: gaps + back-pressure + shadow writes during streaming", $time);
         bp_on = 1'b1;
         to_send = to_send + 300;
         repeat (50) @(posedge aclk);
-        // CPU writes a NEW set into the shadows while data flows: outputs must not change
         write_shadows(16'hF800, 16'h4000, 16'h7FFF, 16'h8000);
         check_read(5'h08, 32'h0000_7FFF, 2'b00);
         wait_drained;
 
-        // ---------- 3. commit set B (pipeline drained) ----------
         check_write(5'h10, 32'h1, 4'hF, 2'b00);
-        mc0 = 16'hF800; mc1 = 16'h4000; mc2 = 16'h7FFF; mc3 = 16'h8000;   // -2048, 16384, 32767, -32768
+        mc0 = 16'hF800; mc1 = 16'h4000; mc2 = 16'h7FFF; mc3 = 16'h8000;
 
-        // ---------- 4. stream B ----------
         $display("[%0t] stream B: negative coefficients", $time);
         to_send = to_send + 300;
         wait_drained;
 
-        // ---------- report ----------
         if (tx_count != 600 || rx_count != 600) begin
             errors = errors + 1;
             $display("ERROR: sent %0d, accepted %0d, received %0d (expected 600)", sent, tx_count, rx_count);
