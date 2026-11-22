@@ -233,7 +233,7 @@ module tb_top;
         check_read (5'h00, 32'h0000_10AB, 2'b00);
         check_write(5'h00, 32'h0000_CD00, 4'b0010, 2'b00);
         check_read (5'h00, 32'h0000_CDAB, 2'b00);
-        check_write(5'h14, 32'hDEAD_BEEF, 4'hF, 2'b10);
+        check_write(5'h14, 32'hA5A5_5A5A, 4'hF, 2'b10);
         check_read (5'h14, 32'h0000_0000, 2'b10);
         check_write(5'h02, 32'h0000_FFFF, 4'hF, 2'b10);
         check_read (5'h00, 32'h0000_CDAB, 2'b00);
